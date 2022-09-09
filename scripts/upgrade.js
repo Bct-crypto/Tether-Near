@@ -8,13 +8,13 @@ const config = {
   networkId: 'sandbox',
   nodeUrl: 'http://0.0.0.0:3030',
   keyPath: '/tmp/near-sandbox/validator_key.json',
-  contractPath: './target/wasm32-unknown-unknown/release/usdt_gold.wasm',
+  contractPath: './target/wasm32-unknown-unknown/release/tether_token.wasm',
   accountId: 'test.near',
   contractId: 'test.near',
 };
 
 const methods = {
-  viewMethods: ['get_version'],
+  viewMethods: ['version'],
 };
 
 (async function () {
@@ -44,7 +44,7 @@ const methods = {
   });
 
   // Check that the contract has been upgraded.
-  // Change the `get_version` method returning 'UPGRADED:VERSION' to test this.
+  // Change the `version` method returning 'UPGRADED:VERSION' to test this.
   const contract = new nearAPI.Contract(account, config.contractId, methods);
-  assert.equal(await contract.get_version(), 'UPGRADED:VERSION');
+  assert.equal(await contract.version(), 'UPGRADED:VERSION');
 })();

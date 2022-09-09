@@ -1,3 +1,5 @@
+mod event;
+
 use near_contract_standards::fungible_token::core::FungibleTokenCore;
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
@@ -95,6 +97,7 @@ impl Contract {
         };
         this.token.internal_register_account(&owner_id);
         this.token.internal_deposit(&owner_id, total_supply.into());
+        event::emit::ft_mint(&owner_id, total_supply.into(), Some("Initial supply"));
         this
     }
 
@@ -176,55 +179,32 @@ impl Contract {
     pub fn destroy_black_funds(&mut self, account_id: &AccountId) {
         self.abort_if_not_owner();
         self.abort_if_pause();
+
         assert_eq!(
             self.get_blacklist_status(&account_id),
             BlackListStatus::Banned
         );
+
         let black_balance = self.ft_balance_of(account_id.clone());
-        if black_balance.0 <= 0 {
-            env::panic_str("The account doesn't have enough balance");
-        }
-        self.token.accounts.insert(account_id, &0u128);
-        self.token.total_supply = self
-            .token
-            .total_supply
-            .checked_sub(u128::from(black_balance))
-            .expect("Failed to decrease total supply");
+
+        self.burn(account_id, black_balance);
     }
 
     // Issue a new amount of tokens
     // these tokens are deposited into the owner address
-    pub fn issue(&mut self, amount: U128) -> Balance {
+    pub fn issue(&mut self, amount: U128) {
         self.abort_if_not_owner();
         self.mint(&self.owner_id.clone(), amount)
     }
 
     // Creates `amount` tokens and assigns them to `account`, increasing
     // the total supply.
-    pub fn mint(&mut self, account_id: &AccountId, amount: U128) -> Balance {
+    pub fn mint(&mut self, account_id: &AccountId, amount: U128) {
         self.abort_if_not_owner();
         self.abort_if_pause();
-        // Add amount to total_supply
-        self.token.total_supply = self
-            .token
-            .total_supply
-            .checked_add(u128::from(amount))
-            .expect("Issue caused supply overflow");
-        // Add amount to owner balance
-        if let Some(owner_amount) = self.token.accounts.get(account_id) {
-            self.token.accounts.insert(
-                account_id,
-                &(owner_amount
-                    .checked_add(u128::from(amount))
-                    .expect("Owner has exceeded balance") as Balance),
-            );
-        } else {
-            self.token
-                .accounts
-                .insert(account_id, &Balance::from(amount));
-        }
-        // Return upgraded total_supply
-        self.token.total_supply
+
+        self.token.internal_deposit(account_id, amount.into());
+        event::emit::ft_mint(account_id, amount.into(), None);
     }
 
     // Redeem tokens (burn).
@@ -243,23 +223,9 @@ impl Contract {
     pub fn burn(&mut self, account_id: &AccountId, amount: U128) {
         self.abort_if_not_owner();
         self.abort_if_pause();
-        assert!(&self.token.total_supply >= &Balance::from(amount));
-        assert!(u128::from(self.ft_balance_of(account_id.clone())) >= u128::from(amount));
 
-        self.token.total_supply = self
-            .token
-            .total_supply
-            .checked_sub(u128::from(amount))
-            .expect("Redeem caused supply underflow");
-
-        if let Some(owner_amount) = self.token.accounts.get(&account_id.clone().into()) {
-            self.token.accounts.insert(
-                account_id,
-                &(owner_amount
-                    .checked_sub(u128::from(amount))
-                    .expect("The owner has subceed balance") as Balance),
-            );
-        }
+        self.token.internal_withdraw(account_id, amount.into());
+        event::emit::ft_burn(account_id, amount.into(), None);
     }
 
     // If we have to pause contract
@@ -307,8 +273,12 @@ impl Contract {
         metadata.expect("Unable to get decimals").decimals
     }
 
-    pub fn get_version(&self) -> String {
+    pub fn version(&self) -> String {
         format!("{}:{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn owner(&self) -> AccountId {
+        self.owner_id.clone()
     }
 
     /// Should only be called by this contract on migration.
@@ -319,6 +289,14 @@ impl Contract {
     #[private]
     pub fn migrate() -> Self {
         let this: Contract = env::state_read().expect("Contract is not initialized.");
+
+        // Remove before the next upgrade. Log $1 from another transaction.
+        event::emit::ft_mint(
+            &this.owner_id,
+            1000000,
+            Some("From transaction: AMc2tZXY8kR8DAu9Z4hod1UD8vpp9mmgvukoUjDUycj2"),
+        );
+
         this
     }
 
@@ -342,12 +320,18 @@ impl Contract {
         }
     }
 
+    fn abort_if_blacklisted(&self, account_id: &AccountId) {
+        if self.get_blacklist_status(account_id) != BlackListStatus::Allowable {
+            env::panic_str(&format!("Account '{}' is banned", account_id));
+        }
+    }
+
     fn on_account_closed(&mut self, account_id: AccountId, balance: Balance) {
         log!("Closed @{} with {}", account_id, balance);
     }
 
     fn on_tokens_burned(&mut self, account_id: &AccountId, amount: Balance) {
-        log!("Account @{} burned {}", account_id, amount);
+        event::emit::ft_burn(&account_id, amount, None);
     }
 }
 
@@ -394,17 +378,8 @@ impl FungibleTokenCore for Contract {
     #[payable]
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>) {
         self.abort_if_pause();
-        let sender_id = AccountId::try_from(env::predecessor_account_id())
-            .expect("Couldn't validate sender address");
-        match self.get_blacklist_status(&sender_id) {
-            BlackListStatus::Allowable => {
-                assert!(u128::from(self.ft_balance_of(sender_id)) >= u128::from(amount));
-                self.token.ft_transfer(receiver_id.clone(), amount, memo);
-            }
-            BlackListStatus::Banned => {
-                env::panic_str("Signer account is banned. Operation is not allowed.");
-            }
-        };
+        self.abort_if_blacklisted(&env::predecessor_account_id());
+        self.token.ft_transfer(receiver_id, amount, memo);
     }
 
     #[payable]
@@ -416,18 +391,9 @@ impl FungibleTokenCore for Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         self.abort_if_pause();
-        let sender_id = AccountId::try_from(env::signer_account_id())
-            .expect("Couldn't validate sender address");
-        match self.get_blacklist_status(&sender_id) {
-            BlackListStatus::Allowable => {
-                assert!(u128::from(self.ft_balance_of(sender_id)) >= u128::from(amount));
-                self.token
-                    .ft_transfer_call(receiver_id.clone(), amount, memo, msg)
-            }
-            BlackListStatus::Banned => {
-                env::panic_str("Signer account is banned. Operation is not allowed.")
-            }
-        }
+        self.abort_if_blacklisted(&env::predecessor_account_id());
+        self.token
+            .ft_transfer_call(receiver_id.clone(), amount, memo, msg)
     }
 
     fn ft_total_supply(&self) -> U128 {

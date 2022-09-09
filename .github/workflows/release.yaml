@@ -28,9 +28,9 @@ jobs:
         rustup default stable
         rustup target add wasm32-unknown-unknown
         cargo build --target wasm32-unknown-unknown --profile release
-        mv target/wasm32-unknown-unknown/release/usdt_gold.wasm target/usdt_gold.wasm
+        mv target/wasm32-unknown-unknown/release/tether_token.wasm target/tether_token.wasm
     - name: Publish
       uses: ncipollo/release-action@v1
       with:
-        artifacts: "target/usdt_gold.wasm"
+        artifacts: "target/tether_token.wasm"
         token: ${{ secrets.GITHUB_TOKEN }}
