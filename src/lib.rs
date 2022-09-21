@@ -289,14 +289,6 @@ impl Contract {
     #[private]
     pub fn migrate() -> Self {
         let this: Contract = env::state_read().expect("Contract is not initialized.");
-
-        // Remove before the next upgrade. Log $1 from another transaction.
-        event::emit::ft_mint(
-            &this.owner_id,
-            1000000,
-            Some("From transaction: AMc2tZXY8kR8DAu9Z4hod1UD8vpp9mmgvukoUjDUycj2"),
-        );
-
         this
     }
 
